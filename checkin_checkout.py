@@ -1,150 +1,122 @@
-import cv2
 import face_recognition
+import cv2
+import numpy as np
 import os
 import pickle
-import numpy as np
-import pandas as pd
 from datetime import datetime
+import pandas as pd
+from datetime import datetime, timedelta
 
-import datetime
-checked_in_users = {}
+EXCEL_FILE = "visitors.xlsx"
 
+def load_known_faces(folder):
+    encodings = []
+    names = []
+    cnics = []
 
-ENCODING_DIR = 'encodings'
-EXCEL_LOG = 'visitors.xlsx'
-
-
-# Load known encodings
-def load_known_faces():
-    encodings, names, cnics = [], [], []
-    for file in os.listdir(ENCODING_DIR):
-        if file.endswith('.pkl'):
-            with open(os.path.join(ENCODING_DIR, file), 'rb') as f:
+    for filename in os.listdir(folder):
+        if filename.endswith(".pkl"):
+            filepath = os.path.join(folder, filename)
+            with open(filepath, "rb") as f:
                 data = pickle.load(f)
-                encodings.append(data['encoding'])
-                names.append(data['name'])
-                cnics.append(data['cnic'])
+                encodings.append(data["encoding"])
+                names.append(data["name"])
+                cnics.append(data["cnic"])
     return encodings, names, cnics
 
+def recognize_face(frame, known_encodings, known_names, known_cnic):
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    face_locations = face_recognition.face_locations(rgb_frame)
+    face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
 
-def handle_checkin_checkout(name, cnic):
-    now = datetime.datetime.now()
-    if cnic in checked_in_users:
-        last_checkin = checked_in_users[cnic]
-        delta = now - last_checkin
+    for face_encoding in face_encodings:
+        matches = face_recognition.compare_faces(known_encodings, face_encoding, tolerance=0.45)
+        face_distances = face_recognition.face_distance(known_encodings, face_encoding)
+        best_match_index = np.argmin(face_distances)
 
-        if delta.total_seconds() < 300:  # less than 5 minutes
-            print(f"{name} already checked in recently.")
-            return
-        else:
-            # Mark as checkout
-            checked_in_users.pop(cnic)
-            print(f"{name} checked out at {now}")
-            update_excel(name, cnic, checkin=False, timestamp=now)
+        if matches[best_match_index]:
+            return known_names[best_match_index], known_cnic[best_match_index]
+    return None, None
+
+def load_or_create_excel(file):
+    if os.path.exists(file):
+        return pd.read_excel(file)
     else:
-        # First-time check-in
-        checked_in_users[cnic] = now
-        print(f"{name} checked in at {now}")
-        update_excel(name, cnic, checkin=True, timestamp=now)
+        df = pd.DataFrame(columns=["Name", "CNIC", "Check-ins", "Check-outs"])
+        df.to_excel(file, index=False)
+        return df
 
+def update_visitor_log(name, cnic):
+    df = load_or_create_excel(EXCEL_FILE)
+    cnic = str(cnic)
+    now = datetime.now()
 
+    if cnic in df["CNIC"].astype(str).values:
+        idx = df[df["CNIC"].astype(str) == cnic].index[0]
 
-# Load or create Excel log
-def load_log():
-    if os.path.exists(EXCEL_LOG):
-        return pd.read_excel(EXCEL_LOG)
-    return pd.DataFrame(columns=["Name", "CNIC", "Check-in", "Check-out"])
+        checkins = str(df.at[idx, "Check-ins"]) if pd.notna(df.at[idx, "Check-ins"]) else ""
+        checkouts = str(df.at[idx, "Check-outs"]) if pd.notna(df.at[idx, "Check-outs"]) else ""
 
+        checkin_list = checkins.split("\n") if checkins else []
+        checkout_list = checkouts.split("\n") if checkouts else []
 
-# Save log to Excel
-def save_log(df):
-    df.to_excel(EXCEL_LOG, index=False)
+        def parse_times(lst):
+            return [datetime.strptime(t.strip(), "%Y-%m-%d %H:%M:%S") for t in lst if t.strip()]
 
+        parsed_checkins = parse_times(checkin_list)
+        parsed_checkouts = parse_times(checkout_list)
 
-# Check if already checked in but not out
-def is_checked_in(df, cnic):
-    last_entry = df[df["CNIC"] == cnic]
-    if not last_entry.empty and pd.isna(last_entry.iloc[-1]["Check-out"]):
-        return True
-    return False
+        last_checkin = parsed_checkins[-1] if parsed_checkins else None
+        last_checkout = parsed_checkouts[-1] if parsed_checkouts else None
 
-
-def update_excel(name, cnic, checkin=True, timestamp=None):
-    import pandas as pd
-
-    file = 'visitors.xlsx'
-    timestamp_str = timestamp.strftime("%Y-%m-%d %H:%M:%S")
-
-    try:
-        df = pd.read_excel(file)
-    except FileNotFoundError:
-        df = pd.DataFrame(columns=["Name", "CNIC", "Check-in", "Check-out"])
-
-    row_index = df[df["CNIC"] == cnic].index
-
-    if len(row_index) == 0:
-        new_row = {"Name": name, "CNIC": cnic, "Check-in": timestamp_str if checkin else "", "Check-out": timestamp_str if not checkin else ""}
-        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-    else:
-        idx = row_index[0]
-        if checkin:
-            if pd.isna(df.at[idx, "Check-in"]) or df.at[idx, "Check-in"] == "":
-                df.at[idx, "Check-in"] = timestamp_str
+        if last_checkin and (not last_checkout or last_checkin > last_checkout):
+            # Last action was check-in
+            if now - last_checkin >= timedelta(minutes=1):
+                checkout_list.append(now.strftime("%Y-%m-%d %H:%M:%S"))
+                print(f"{name} checked out.")
             else:
-                df.at[idx, "Check-in"] += f" | {timestamp_str}"
+                print(f"{name} just checked in recently. Wait before checking out.")
+                return
         else:
-            if pd.isna(df.at[idx, "Check-out"]) or df.at[idx, "Check-out"] == "":
-                df.at[idx, "Check-out"] = timestamp_str
-            else:
-                df.at[idx, "Check-out"] += f" | {timestamp_str}"
+            # Last action was checkout (or nothing yet)
+            if last_checkout and now - last_checkout < timedelta(minutes=1):
+                print(f"{name} just checked out. Wait before checking in.")
+                return
+            checkin_list.append(now.strftime("%Y-%m-%d %H:%M:%S"))
+            print(f"{name} checked in.")
 
-    df.to_excel(file, index=False)
+        df.at[idx, "Check-ins"] = "\n".join(checkin_list)
+        df.at[idx, "Check-outs"] = "\n".join(checkout_list)
 
+    else:
+        # New visitor
+        df.loc[len(df)] = [name, cnic, now.strftime("%Y-%m-%d %H:%M:%S"), ""]
 
+    df.to_excel(EXCEL_FILE, index=False)
 
 def main():
-    known_encodings, known_names, known_cnics = load_known_faces()
-    log_df = load_log()
+    known_encodings, known_names, known_cnic = load_known_faces("encodings")
 
     cap = cv2.VideoCapture(0)
-    print("[INFO] Starting webcam...")
+    print("Press 'q' to quit...")
 
     while True:
         ret, frame = cap.read()
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        if not ret:
+            break
 
-        face_locations = face_recognition.face_locations(rgb)
-        face_encodings = face_recognition.face_encodings(rgb, face_locations)
+        name, cnic = recognize_face(frame, known_encodings, known_names, known_cnic)
+        if name:
+            print(f"Recognized: {name} ({cnic})")
+            update_visitor_log(name, cnic)
+            cv2.putText(frame, f"{name}", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-        for face_encoding, face_location in zip(face_encodings, face_locations):
-            matches = face_recognition.compare_faces(known_encodings, face_encoding)
-            name = "Unknown"
-
-            if True in matches:
-                idx = matches.index(True)
-                name = known_names[idx]
-                cnic = known_cnics[idx]
-
-                handle_checkin_checkout(name, cnic)
-                status = f"Detected: {name}"
-            else:
-                status = "Visitor not recognized"
-
-            # Draw rectangle and label
-            top, right, bottom, left = face_location
-            cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
-            cv2.putText(frame, status, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-
-        cv2.imshow("Visitor Management - Checkin/Checkout", frame)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
+        cv2.imshow("Face Recognition - Check-in/Check-out", frame)
+        if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
     cap.release()
     cv2.destroyAllWindows()
-    save_log(log_df)
-    print("[INFO] Log saved to Excel.")
 
 if __name__ == "__main__":
     main()
