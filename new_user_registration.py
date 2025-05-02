@@ -31,5 +31,5 @@ def register_new_user(encoding, frame):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
     cv2.imshow("Registration Successful", frame)
-    cv2.waitKey(2000)  # Show for 2 seconds
+    cv2.waitKey(2000)  
     cv2.destroyWindow("Registration Successful")
